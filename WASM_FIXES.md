@@ -172,16 +172,29 @@ in the picture handling code was replaced with a call to one of these helpers.
 
 ## Memory Model After Fixes
 
-| Phase                       | Peak extra WASM heap (200 MB file)                                                                              |
-| --------------------------- | --------------------------------------------------------------------------------------------------------------- |
-| **Before** `loadFromBuffer` | `std::vector` copy (200 MB) + `ByteVector` copy (200 MB) + `std::string` for format (200 MB) = **600 MB extra** |
-| **After** `loadFromBuffer`  | `malloc` temp (200 MB, freed immediately) + `ByteVector` copy (200 MB) = **200 MB extra at peak**               |
-| `getBuffer` before          | Extra Uint8Array (200 MB in WASM + 200 MB in JS) = **400 MB extra**                                             |
-| `getBuffer` after           | HEAPU8 view (zero-copy) + JS copy = **200 MB extra**                                                            |
+| Phase                       | Peak extra WASM heap (200 MB file)                                                                                 |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| **Before** `loadFromBuffer` | `std::vector` copy (200 MB) + `ByteVector` copy (200 MB) + `std::string` for format (200 MB) = **600 MB extra**    |
+| **After** `loadFromBuffer`  | `std::vector` from `convertJSArrayToNumberVector` (200 MB) + `ByteVector` copy (200 MB) = **200 MB extra at peak** |
+| `getBuffer` before          | Element-by-element Uint8Array (200 MB in WASM + 200 MB in JS) = **400 MB extra**                                   |
+| `getBuffer` after           | `typed_memory_view` (zero-copy view) + JS copy = **200 MB extra**                                                  |
 
 A 200 MB file now needs roughly **400 MB** of WASM heap headroom instead of
-**1 GB**, fitting well within the `MAXIMUM_MEMORY=1GB` limit in
-`build/build-wasm.sh`.
+**1 GB**.
+
+### Build-time Memory Settings (`build/build-wasm.sh`)
+
+| Flag                    | Value   | Purpose                                                               |
+| ----------------------- | ------- | --------------------------------------------------------------------- |
+| `ALLOW_MEMORY_GROWTH=1` | enabled | Heap **grows automatically** as needed — no manual sizing required    |
+| `INITIAL_MEMORY`        | 64 MB   | Starting heap size; avoids early grow calls for typical audio files   |
+| `MAXIMUM_MEMORY`        | 4 GB    | Ceiling for dynamic growth (safe max for 32-bit WASM on 64-bit hosts) |
+
+`ALLOW_MEMORY_GROWTH=1` means the WASM heap expands automatically whenever
+`malloc` needs more space — there is **no need** to pre-size for the exact file
+being processed. The `INITIAL_MEMORY` of 64 MB covers TagLib's own footprint
+plus typical audio files without an early grow. For very large files (e.g.
+uncompressed WAV), the heap grows on demand up to the 4 GB ceiling.
 
 ---
 
