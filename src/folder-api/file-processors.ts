@@ -52,17 +52,17 @@ export async function processFileWithTagLib(
     const hasCoverArt = pictures.length > 0;
 
     const dynamics: AudioDynamics = {};
-    const fieldNames = [
+    const replayGainFields = [
       "replayGainTrackGain",
       "replayGainTrackPeak",
       "replayGainAlbumGain",
       "replayGainAlbumPeak",
-    ];
+    ] as const;
 
-    for (const field of fieldNames) {
+    for (const field of replayGainFields) {
       const value = audioFile.getProperty(field);
       if (value) {
-        (dynamics as any)[field] = value;
+        dynamics[field] = value;
       }
     }
 

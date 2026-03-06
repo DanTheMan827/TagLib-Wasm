@@ -31,8 +31,29 @@ async function readFullFile(
   return (await readFile(path)).slice(0, fileSize);
 }
 
+type DenoFsFile = {
+  read(buffer: Uint8Array): Promise<number | null>;
+  seek(offset: number, whence: number): Promise<number>;
+  stat(): Promise<{ size: number }>;
+  close(): void;
+};
+
+type DenoGlobal = {
+  readFile(path: string): Promise<Uint8Array>;
+  writeFile(path: string, data: Uint8Array): Promise<void>;
+  stat(path: string): Promise<{ size: number }>;
+  readDir(
+    path: string,
+  ): AsyncIterable<{ name: string; isDirectory: boolean; isFile: boolean }>;
+  open(
+    path: string,
+    options: { read?: boolean; write?: boolean },
+  ): Promise<DenoFsFile>;
+  SeekMode: { Start: 0; Current: 1; End: 2 };
+};
+
 function createDenoIO(): PlatformIO {
-  const D = (globalThis as Record<string, unknown>).Deno as typeof Deno;
+  const D = (globalThis as Record<string, unknown>).Deno as DenoGlobal;
   return {
     readFile: (path) => D.readFile(path),
     writeFile: (path, data) => D.writeFile(path, data),

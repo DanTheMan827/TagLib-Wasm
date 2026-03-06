@@ -8,7 +8,7 @@ declare global {
   // deno-lint-ignore no-explicit-any
   namespace Deno {
     // These must be `any` (not `unknown`) because wasi-fs-deno.ts and
-    // platform-io.ts call methods on these types. In Deno, real types
+    // deno-compile.ts call methods on these types. In Deno, real types
     // override these stubs; in Node.js tsc, `unknown` would break the build.
     // deno-lint-ignore no-explicit-any
     type FsFile = any;

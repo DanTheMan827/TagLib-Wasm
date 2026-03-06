@@ -20,14 +20,14 @@ export async function loadTagLibModule(
 ): Promise<TagLibModule> {
   // These import paths are rewritten by the esbuild browser plugin to
   // "./taglib-wrapper.js" (co-located in dist/). Source paths kept for tsc.
-  let createTagLibModule;
+  let createTagLibModule: ((config?: Record<string, unknown>) => Promise<TagLibModule>) | undefined;
   try {
-    const module = await import("../../build/taglib-wrapper.js");
-    createTagLibModule = module.default;
+    const m = await import("../../build/taglib-wrapper.js");
+    createTagLibModule = m.default as typeof createTagLibModule;
   } catch {
     try {
-      const module = await import("../../dist/taglib-wrapper.js");
-      createTagLibModule = module.default;
+      const m = await import("../../dist/taglib-wrapper.js");
+      createTagLibModule = m.default as typeof createTagLibModule;
     } catch {
       throw new TagLibInitializationError(
         "Could not load taglib-wrapper.js. Ensure it is co-located with the browser bundle.",
@@ -55,6 +55,5 @@ export async function loadTagLibModule(
       path.endsWith(".wasm") ? wasmUrl.href : path;
   }
 
-  const module = await createTagLibModule(moduleConfig);
-  return module as TagLibModule;
+  return createTagLibModule!(moduleConfig);
 }

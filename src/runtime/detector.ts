@@ -19,6 +19,8 @@ export interface RuntimeDetectionResult {
 
 const g = globalThis as Record<string, unknown>;
 
+type NodeProcess = { versions?: { node?: string } };
+
 const MIN_NODE_MAJOR = 22;
 const MIN_NODE_MINOR = 6;
 
@@ -48,8 +50,9 @@ export function checkNodeVersion(
 
 function hasWASISupport(): boolean {
   if (g.Deno !== undefined) return true;
-  if (g.process !== undefined && (g.process as any).versions?.node) {
-    const [major] = (g.process as any).versions.node.split(".").map(Number);
+  const proc = g.process as NodeProcess | undefined;
+  if (proc?.versions?.node) {
+    const [major] = proc.versions.node.split(".").map(Number);
     return major >= 16;
   }
   return false;
@@ -60,9 +63,12 @@ function isBrowser(): boolean {
 }
 
 function isWebWorker(): boolean {
-  return g.WorkerGlobalScope !== undefined &&
+  const WorkerGlobalScopeCtor = g.WorkerGlobalScope as
+    | (new () => unknown)
+    | undefined;
+  return WorkerGlobalScopeCtor !== undefined &&
     g.self !== undefined &&
-    g.self instanceof (g.WorkerGlobalScope as any);
+    g.self instanceof WorkerGlobalScopeCtor;
 }
 
 function isCloudflareWorker(): boolean {
@@ -79,8 +85,8 @@ function isBun(): boolean {
 }
 
 function isNode(): boolean {
-  return g.process !== undefined &&
-    (g.process as any).versions?.node !== undefined;
+  const proc = g.process as NodeProcess | undefined;
+  return proc?.versions?.node !== undefined;
 }
 
 function isDeno(): boolean {
@@ -219,18 +225,19 @@ export function canLoadWasmType(wasmType: WasmBinaryType): boolean {
   return true;
 }
 
+let _runtimeOverride: RuntimeDetectionResult | undefined;
+
 /** @internal */
 export function _forceRuntime(result: RuntimeDetectionResult): void {
-  (globalThis as any).__taglib_wasm_runtime_override = result;
+  _runtimeOverride = result;
 }
 
 /** @internal */
 export function _clearRuntimeOverride(): void {
-  delete (globalThis as any).__taglib_wasm_runtime_override;
+  _runtimeOverride = undefined;
 }
 
 /** @internal */
 export function _getDetectionResult(): RuntimeDetectionResult {
-  const override = (globalThis as any).__taglib_wasm_runtime_override;
-  return override || detectRuntime();
+  return _runtimeOverride ?? detectRuntime();
 }
