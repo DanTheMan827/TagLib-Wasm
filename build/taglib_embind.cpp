@@ -1,5 +1,4 @@
 #include <emscripten/bind.h>
-#include <emscripten/heap.h>
 #include <emscripten/val.h>
 #include <fileref.h>
 #include <tag.h>
@@ -332,22 +331,6 @@ public:
     
     bool loadFromBuffer(const val& jsBuffer) {
         try {
-            // Read the byte length before any WASM allocation so we can
-            // pre-grow the heap in one shot, avoiding multiple mid-transfer
-            // WebAssembly.Memory.grow() calls.
-            const int byteLength = jsBuffer["byteLength"].as<int>();
-            if (byteLength <= 0) return false;
-
-            // Pre-grow the WASM heap to avoid mid-allocation growth.
-            // loadFromBuffer needs ~3× the file size in temporary heap headroom:
-            //   1× std::vector<uint8_t>     from convertJSArrayToNumberVector
-            //   1× TagLib::ByteVector       copy of the raw data
-            //   1× ByteVectorStream         internal ByteVector copy
-            // emscripten_resize_heap() is a no-op when the heap is already
-            // large enough (target <= current heap size), so this is always safe.
-            emscripten_resize_heap(emscripten_get_heap_size() +
-                                   static_cast<size_t>(byteLength) * 3);
-
             // convertJSArrayToNumberVector<uint8_t> performs a single bulk copy
             // from the JS TypedArray into a std::vector via typed_memory_view +
             // _emval_array_to_memory_view (which resolves to dst.set(src)) —
