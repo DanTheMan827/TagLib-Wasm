@@ -70,9 +70,12 @@ export function decodePropertyMap(msgpackBuffer: Uint8Array): PropertyMap {
 
 export function decodePicture(msgpackBuffer: Uint8Array): Picture {
   try {
-    const picture = decode(msgpackBuffer, MSGPACK_DECODE_OPTIONS) as any;
+    const picture = decode(
+      msgpackBuffer,
+      MSGPACK_DECODE_OPTIONS,
+    ) as Record<string, unknown>;
     coercePictureData(picture);
-    return picture as Picture;
+    return picture as unknown as Picture;
   } catch (error) {
     throw new MetadataError(
       "read",
@@ -83,10 +86,13 @@ export function decodePicture(msgpackBuffer: Uint8Array): Picture {
 
 export function decodePictureArray(msgpackBuffer: Uint8Array): Picture[] {
   try {
-    const pictures = decode(msgpackBuffer, MSGPACK_DECODE_OPTIONS) as any[];
+    const pictures = decode(
+      msgpackBuffer,
+      MSGPACK_DECODE_OPTIONS,
+    ) as Record<string, unknown>[];
     return pictures.map((picture) => {
       coercePictureData(picture);
-      return picture as Picture;
+      return picture as unknown as Picture;
     });
   } catch (error) {
     throw new MetadataError(

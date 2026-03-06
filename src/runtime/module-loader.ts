@@ -53,9 +53,8 @@ export async function loadTagLibModule(
   options?: LoadTagLibOptions,
 ): Promise<TagLibModule> {
   const g = globalThis as Record<string, unknown>;
-  const nodeVersion = (g.process as any)?.versions?.node as
-    | string
-    | undefined;
+  const proc = g.process as { versions?: { node?: string } } | undefined;
+  const nodeVersion = proc?.versions?.node;
   const versionError = checkNodeVersion(nodeVersion);
   if (versionError) {
     throw new EnvironmentError("Node.js", versionError, "WASI support");
@@ -113,14 +112,14 @@ export async function loadTagLibModule(
 async function loadBufferModeTagLibModule(
   options: LoadTagLibOptions,
 ): Promise<TagLibModule> {
-  let createTagLibModule;
+  let createTagLibModule: ((config?: Record<string, unknown>) => Promise<TagLibModule>) | undefined;
   try {
-    const module = await import("../../build/taglib-wrapper.js");
-    createTagLibModule = module.default;
+    const m = await import("../../build/taglib-wrapper.js");
+    createTagLibModule = m.default as typeof createTagLibModule;
   } catch {
     try {
-      const module = await import("../../dist/taglib-wrapper.js");
-      createTagLibModule = module.default;
+      const m = await import("../../dist/taglib-wrapper.js");
+      createTagLibModule = m.default as typeof createTagLibModule;
     } catch {
       throw new TagLibInitializationError(
         "Could not load taglib-wrapper.js from either ./build or ./dist",
@@ -147,8 +146,8 @@ async function loadBufferModeTagLibModule(
       path.endsWith(".wasm") ? wasmUrl.href : path;
   }
 
-  const module = await createTagLibModule(moduleConfig);
-  return module as TagLibModule;
+  const module = await createTagLibModule!(moduleConfig);
+  return module;
 }
 
 /** @internal Try to load embedded Wasm from the default path. */
