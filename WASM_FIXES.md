@@ -3,14 +3,14 @@
 ## Overview
 
 This document summarizes the bugs found, explains why they cause 200 MB files
-to fail, and shows the exact code changes that fix them.  
+to fail, and shows the exact code changes that fix them.\
 All fixes live in **`build/taglib_embind.cpp`**, the C++ source that is compiled
 into **`build/taglib-web.wasm`** (the Emscripten backend used by browsers and
 environments that cannot use the WASI backend).
 
 > **The pre-compiled `.wasm` binary in this repository is built from the
-> `.cpp` source by CI.**  The source has already been patched with all fixes
-> described below.  The binary will be regenerated automatically the next time
+> `.cpp` source by CI.** The source has already been patched with all fixes
+> described below. The binary will be regenerated automatically the next time
 > `build/build-wasm.sh` is run with Emscripten installed (≥ 3.x, emsdk).
 
 ---
@@ -32,8 +32,8 @@ for (unsigned int i = 0; i < length; i++) {
 ```
 
 For a 200 MB file that is **200,000,000 separate JavaScript-to-WASM context
-switches**.  Emscripten's embind machinery must resolve each element access
-through the JavaScript engine.  This causes the call to hang or OOM before it
+switches**. Emscripten's embind machinery must resolve each element access
+through the JavaScript engine. This causes the call to hang or OOM before it
 even finishes loading.
 
 **Fix (applied):**
@@ -109,7 +109,7 @@ for (size_t i = 0; i < data->size(); i++) {
 }
 ```
 
-For a 200 MB file this is another 200,000,000 individual element writes.  In
+For a 200 MB file this is another 200,000,000 individual element writes. In
 practice the JavaScript engine stalls and the call never returns.
 
 **Fix (applied):** TagLib's `ByteVector` data already lives in the WASM heap.
@@ -131,7 +131,7 @@ return val::global("Uint8Array").new_(view);              // one native copy
 
 **Location:** All three methods, repeated for MP3, MP4, FLAC, and Ogg branches.
 
-Cover art images stored in tags are typically 100 KB – 10 MB.  The original
+Cover art images stored in tags are typically 100 KB – 10 MB. The original
 code iterated byte-by-byte in the same pattern as issues 1 and 3.
 
 **Fix (applied):** Two private static helpers were added:
@@ -169,12 +169,12 @@ in the picture handling code was replaced with a call to one of these helpers.
 
 ## Memory Model After Fixes
 
-| Phase | Peak extra WASM heap (200 MB file) |
-|---|---|
+| Phase                       | Peak extra WASM heap (200 MB file)                                                                              |
+| --------------------------- | --------------------------------------------------------------------------------------------------------------- |
 | **Before** `loadFromBuffer` | `std::vector` copy (200 MB) + `ByteVector` copy (200 MB) + `std::string` for format (200 MB) = **600 MB extra** |
-| **After** `loadFromBuffer` | `malloc` temp (200 MB, freed immediately) + `ByteVector` copy (200 MB) = **200 MB extra at peak** |
-| `getBuffer` before | Extra Uint8Array (200 MB in WASM + 200 MB in JS) = **400 MB extra** |
-| `getBuffer` after | HEAPU8 view (zero-copy) + JS copy = **200 MB extra** |
+| **After** `loadFromBuffer`  | `malloc` temp (200 MB, freed immediately) + `ByteVector` copy (200 MB) = **200 MB extra at peak**               |
+| `getBuffer` before          | Extra Uint8Array (200 MB in WASM + 200 MB in JS) = **400 MB extra**                                             |
+| `getBuffer` after           | HEAPU8 view (zero-copy) + JS copy = **200 MB extra**                                                            |
 
 A 200 MB file now needs roughly **400 MB** of WASM heap headroom instead of
 **1 GB**, fitting well within the `MAXIMUM_MEMORY=1GB` limit in
@@ -184,7 +184,7 @@ A 200 MB file now needs roughly **400 MB** of WASM heap headroom instead of
 
 ## How to Rebuild the WASM Binary
 
-These changes are already in `build/taglib_embind.cpp`.  To produce a new
+These changes are already in `build/taglib_embind.cpp`. To produce a new
 `build/taglib-web.wasm` + `build/taglib-wrapper.js`:
 
 ```bash
@@ -210,15 +210,15 @@ automatically on every push to `main`.
 
 The WASI backend (`src/runtime/wasi-adapter/wasm-io.ts`) already uses
 `WasmArena` for all JS/WASM buffer transfers and is **not affected** by any of
-the issues above.  No changes were needed to the WASI path.
+the issues above. No changes were needed to the WASI path.
 
 ---
 
 ## Summary Table
 
-| # | File | Function | Bug | Fix | Requires recompile? |
-|---|---|---|---|---|---|
-| 1 | `taglib_embind.cpp` | `loadFromBuffer` | 200M byte-by-byte JS→C++ copies | `HEAPU8.set()` bulk copy | ✅ yes |
-| 2 | `taglib_embind.cpp` | `loadFromBuffer` / `detectFormat` | Full 200 MB file copied into `std::string` for 12-byte format detection | Pass only 12-byte header | ✅ yes |
-| 3 | `taglib_embind.cpp` | `getBuffer` | 200M byte-by-byte C++→JS copies | `HEAPU8.subarray()` + `new Uint8Array` | ✅ yes |
-| 4 | `taglib_embind.cpp` | `getPictures`, `setPictures`, `addPicture` | Byte-by-byte picture data copies | `byteVectorToUint8Array` / `uint8ArrayToByteVector` helpers | ✅ yes |
+| # | File                | Function                                   | Bug                                                                     | Fix                                                         | Requires recompile? |
+| - | ------------------- | ------------------------------------------ | ----------------------------------------------------------------------- | ----------------------------------------------------------- | ------------------- |
+| 1 | `taglib_embind.cpp` | `loadFromBuffer`                           | 200M byte-by-byte JS→C++ copies                                         | `HEAPU8.set()` bulk copy                                    | ✅ yes              |
+| 2 | `taglib_embind.cpp` | `loadFromBuffer` / `detectFormat`          | Full 200 MB file copied into `std::string` for 12-byte format detection | Pass only 12-byte header                                    | ✅ yes              |
+| 3 | `taglib_embind.cpp` | `getBuffer`                                | 200M byte-by-byte C++→JS copies                                         | `HEAPU8.subarray()` + `new Uint8Array`                      | ✅ yes              |
+| 4 | `taglib_embind.cpp` | `getPictures`, `setPictures`, `addPicture` | Byte-by-byte picture data copies                                        | `byteVectorToUint8Array` / `uint8ArrayToByteVector` helpers | ✅ yes              |
