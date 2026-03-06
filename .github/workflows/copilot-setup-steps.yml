@@ -40,7 +40,6 @@ jobs:
           deno-version: v2.x
 
       - name: Setup Bun
-        if: matrix.runtime == 'bun'
         uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
