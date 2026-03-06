@@ -331,35 +331,25 @@ public:
     
     bool loadFromBuffer(const val& jsBuffer) {
         try {
-            // Get the buffer length from byteLength (typed array) or length (generic array)
-            unsigned int length = jsBuffer["byteLength"].isUndefined()
-                ? jsBuffer["length"].as<unsigned int>()
-                : jsBuffer["byteLength"].as<unsigned int>();
+            // convertJSArrayToNumberVector<uint8_t> performs a single bulk copy
+            // from the JS TypedArray into a std::vector via typed_memory_view +
+            // _emval_array_to_memory_view (which resolves to dst.set(src)) —
+            // one native call, O(N) with a tiny constant.
+            // NOTE: vecFromJSArray<T> looks similar but loops byte-by-byte in
+            // C++ and must NOT be used here for the same reason as the original
+            // bug (N JS↔WASM round trips).
+            const auto data = emscripten::convertJSArrayToNumberVector<uint8_t>(jsBuffer);
+            const unsigned int length = static_cast<unsigned int>(data.size());
 
             if (length == 0) return false;
 
-            // --- Fast bulk copy: JS Uint8Array → WASM heap → TagLib ByteVector ---
-            // Allocate a temporary region in the WASM heap so we can use the
-            // native HEAPU8.set() path instead of looping byte-by-byte.
-            uint8_t* heapData = static_cast<uint8_t*>(malloc(length));
-            if (!heapData) return false;
-
-            // HEAPU8.set(srcTypedArray, byteOffset) copies the entire array in
-            // one native call — O(N) with a tiny constant vs O(N) JS↔WASM round
-            // trips for the byte-by-byte approach.
-            uintptr_t heapPtr = reinterpret_cast<uintptr_t>(heapData);
-            val::module_property("HEAPU8").call<void>("set", jsBuffer, heapPtr);
-
-            // Capture just the first 12 bytes for format detection BEFORE freeing.
+            // Capture just the first 12 bytes for format detection.
             char header[12] = {};
             unsigned int headerLen = length < 12u ? length : 12u;
-            memcpy(header, heapData, headerLen);
+            memcpy(header, data.data(), headerLen);
 
             // Create ByteVector — TagLib makes its own internal copy here.
-            TagLib::ByteVector buffer(reinterpret_cast<const char*>(heapData), length);
-
-            // Release our temporary allocation now that ByteVector has its copy.
-            free(heapData);
+            TagLib::ByteVector buffer(reinterpret_cast<const char*>(data.data()), length);
             
             // Create a ByteVectorStream
             stream = std::make_unique<TagLib::ByteVectorStream>(buffer);
@@ -621,29 +611,25 @@ private:
     }
 
     // Convert a TagLib::ByteVector to a JavaScript Uint8Array using a single
-    // native bulk copy via HEAPU8.subarray() instead of a byte-by-byte loop.
+    // native bulk copy via typed_memory_view instead of a byte-by-byte loop.
+    // typed_memory_view(n, ptr) creates a Uint8Array view backed by WASM memory;
+    // passing it to new Uint8Array(...) performs a single native copy into JS.
     static val byteVectorToUint8Array(const TagLib::ByteVector& bv) {
         if (bv.isEmpty()) return val::global("Uint8Array").new_(0);
-        uintptr_t ptr = reinterpret_cast<uintptr_t>(bv.data());
-        val heapu8 = val::module_property("HEAPU8");
-        val view = heapu8.call<val>("subarray", ptr, ptr + bv.size());
+        auto view = emscripten::typed_memory_view(
+            bv.size(), reinterpret_cast<const uint8_t*>(bv.data()));
         return val::global("Uint8Array").new_(view);
     }
 
     // Copy a JavaScript Uint8Array into a TagLib::ByteVector using a single
-    // native bulk copy via HEAPU8.set() instead of a byte-by-byte loop.
+    // native bulk copy. convertJSArrayToNumberVector uses typed_memory_view +
+    // _emval_array_to_memory_view (dst.set(src)) internally — one native call.
+    // NOTE: vecFromJSArray<T> must NOT be used here; it loops byte-by-byte.
     static TagLib::ByteVector uint8ArrayToByteVector(const val& jsArray) {
-        unsigned int length = jsArray["byteLength"].isUndefined()
-            ? jsArray["length"].as<unsigned int>()
-            : jsArray["byteLength"].as<unsigned int>();
-        if (length == 0) return TagLib::ByteVector();
-        uint8_t* buf = static_cast<uint8_t*>(malloc(length));
-        if (!buf) return TagLib::ByteVector();
-        uintptr_t ptr = reinterpret_cast<uintptr_t>(buf);
-        val::module_property("HEAPU8").call<void>("set", jsArray, ptr);
-        TagLib::ByteVector bv(reinterpret_cast<const char*>(buf), length);
-        free(buf);
-        return bv;
+        const auto vec = emscripten::convertJSArrayToNumberVector<uint8_t>(jsArray);
+        if (vec.empty()) return TagLib::ByteVector();
+        return TagLib::ByteVector(reinterpret_cast<const char*>(vec.data()),
+                                  static_cast<unsigned int>(vec.size()));
     }
 
 public:
@@ -655,13 +641,14 @@ public:
 
             if (sz == 0) return val::global("Uint8Array").new_(0);
 
-            // The ByteVector's data lives in the WASM heap.  Get its raw address
-            // and create a temporary view via HEAPU8.subarray(), then hand that
-            // view to the Uint8Array constructor which performs a single native
-            // bulk copy — replacing the previous byte-by-byte loop.
-            uintptr_t ptr = reinterpret_cast<uintptr_t>(data->data());
-            val heapu8 = val::module_property("HEAPU8");
-            val view = heapu8.call<val>("subarray", ptr, ptr + sz);
+            // typed_memory_view creates a zero-copy Uint8Array view over the
+            // WASM heap bytes owned by the ByteVector. Passing it to
+            // new Uint8Array(...) performs a single native bulk copy into a
+            // fresh JS-owned buffer — replacing the previous byte-by-byte loop.
+            // Note: val::module_property("HEAPU8") does NOT work because
+            // HEAPU8 is a local closure variable, not a Module property.
+            auto view = emscripten::typed_memory_view(
+                sz, reinterpret_cast<const uint8_t*>(data->data()));
             return val::global("Uint8Array").new_(view);
         }
         

@@ -39,18 +39,24 @@ even finishes loading.
 **Fix (applied):**
 
 ```cpp
-// AFTER – one native bulk copy via HEAPU8.set()
-uint8_t* heapData = static_cast<uint8_t*>(malloc(length));
-uintptr_t heapPtr = reinterpret_cast<uintptr_t>(heapData);
-val::module_property("HEAPU8").call<void>("set", jsBuffer, heapPtr);
-// TagLib::ByteVector makes its own internal copy
-TagLib::ByteVector buffer(reinterpret_cast<const char*>(heapData), length);
-free(heapData);   // release the temporary region immediately
+// AFTER – one native bulk copy via convertJSArrayToNumberVector
+// Internally: typed_memory_view(l, rv.data()) + _emval_array_to_memory_view
+// which resolves to dst.set(src) — a single native TypedArray operation.
+// NOTE: vecFromJSArray<T> must NOT be used here; it loops byte-by-byte in
+// C++ (N JS↔WASM round trips) and has the same cost as the original bug.
+const auto data = emscripten::convertJSArrayToNumberVector<uint8_t>(jsBuffer);
+TagLib::ByteVector buffer(reinterpret_cast<const char*>(data.data()), data.size());
 ```
 
-`HEAPU8.set(src, byteOffset)` is a single native TypedArray operation – it
-copies the entire buffer in **one call** using the browser/runtime's optimised
-memory copy path (usually `memcpy` under the hood).
+`convertJSArrayToNumberVector<uint8_t>` allocates a `std::vector<uint8_t>` in
+WASM memory, creates a `typed_memory_view` (a JS `Uint8Array`) over it, then
+calls `_emval_array_to_memory_view` which resolves to `dst.set(src)` — a single
+native TypedArray bulk copy. The bytes physically land in WASM memory in one
+call.
+
+> **Why not `vecFromJSArray<T>`?** Despite the similar name,
+> `vecFromJSArray` loops in C++: `for (i) rv.push_back(v[i].as<T>())` — N
+> separate JS↔WASM boundary crossings, identical to the original bug.
 
 ---
 
@@ -134,31 +140,28 @@ return val::global("Uint8Array").new_(view);              // one native copy
 Cover art images stored in tags are typically 100 KB – 10 MB. The original
 code iterated byte-by-byte in the same pattern as issues 1 and 3.
 
-**Fix (applied):** Two private static helpers were added:
+**Fix (applied):** Two private static helpers use `convertJSArrayToNumberVector`
+(JS→WASM) and `typed_memory_view` (WASM→JS):
 
 ```cpp
-// C++ → JS  (used in getPictures)
+// WASM → JS  (used in getPictures, getBuffer)
 static val byteVectorToUint8Array(const TagLib::ByteVector& bv) {
     if (bv.isEmpty()) return val::global("Uint8Array").new_(0);
-    uintptr_t ptr = reinterpret_cast<uintptr_t>(bv.data());
-    val heapu8 = val::module_property("HEAPU8");
-    val view = heapu8.call<val>("subarray", ptr, ptr + bv.size());
+    // typed_memory_view creates a zero-copy JS Uint8Array view over the WASM
+    // bytes. new Uint8Array(view) copies them into a fresh JS-owned buffer.
+    auto view = emscripten::typed_memory_view(
+        bv.size(), reinterpret_cast<const uint8_t*>(bv.data()));
     return val::global("Uint8Array").new_(view);
 }
 
-// JS → C++  (used in setPictures / addPicture)
+// JS → WASM  (used in setPictures / addPicture)
 static TagLib::ByteVector uint8ArrayToByteVector(const val& jsArray) {
-    unsigned int length = jsArray["byteLength"].isUndefined()
-        ? jsArray["length"].as<unsigned int>()
-        : jsArray["byteLength"].as<unsigned int>();
-    if (length == 0) return TagLib::ByteVector();
-    uint8_t* buf = static_cast<uint8_t*>(malloc(length));
-    if (!buf) return TagLib::ByteVector();
-    uintptr_t ptr = reinterpret_cast<uintptr_t>(buf);
-    val::module_property("HEAPU8").call<void>("set", jsArray, ptr);
-    TagLib::ByteVector bv(reinterpret_cast<const char*>(buf), length);
-    free(buf);
-    return bv;
+    // convertJSArrayToNumberVector uses typed_memory_view + dst.set(src)
+    // internally — one native bulk copy, not a byte-by-byte loop.
+    const auto vec = emscripten::convertJSArrayToNumberVector<uint8_t>(jsArray);
+    if (vec.empty()) return TagLib::ByteVector();
+    return TagLib::ByteVector(reinterpret_cast<const char*>(vec.data()),
+                              static_cast<unsigned int>(vec.size()));
 }
 ```
 
@@ -216,9 +219,9 @@ the issues above. No changes were needed to the WASI path.
 
 ## Summary Table
 
-| # | File                | Function                                   | Bug                                                                     | Fix                                                         | Requires recompile? |
-| - | ------------------- | ------------------------------------------ | ----------------------------------------------------------------------- | ----------------------------------------------------------- | ------------------- |
-| 1 | `taglib_embind.cpp` | `loadFromBuffer`                           | 200M byte-by-byte JS→C++ copies                                         | `HEAPU8.set()` bulk copy                                    | ✅ yes              |
-| 2 | `taglib_embind.cpp` | `loadFromBuffer` / `detectFormat`          | Full 200 MB file copied into `std::string` for 12-byte format detection | Pass only 12-byte header                                    | ✅ yes              |
-| 3 | `taglib_embind.cpp` | `getBuffer`                                | 200M byte-by-byte C++→JS copies                                         | `HEAPU8.subarray()` + `new Uint8Array`                      | ✅ yes              |
-| 4 | `taglib_embind.cpp` | `getPictures`, `setPictures`, `addPicture` | Byte-by-byte picture data copies                                        | `byteVectorToUint8Array` / `uint8ArrayToByteVector` helpers | ✅ yes              |
+| # | File                | Function                                   | Bug                                                                     | Fix                                                                                                    | Requires recompile? |
+| - | ------------------- | ------------------------------------------ | ----------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ | ------------------- |
+| 1 | `taglib_embind.cpp` | `loadFromBuffer`                           | 200M byte-by-byte JS→C++ copies                                         | `convertJSArrayToNumberVector<uint8_t>` (one bulk `dst.set(src)` call)                                 | ✅ yes              |
+| 2 | `taglib_embind.cpp` | `loadFromBuffer` / `detectFormat`          | Full 200 MB file copied into `std::string` for 12-byte format detection | Pass only 12-byte header                                                                               | ✅ yes              |
+| 3 | `taglib_embind.cpp` | `getBuffer`                                | 200M byte-by-byte C++→JS copies                                         | `typed_memory_view` + `new Uint8Array(view)`                                                           | ✅ yes              |
+| 4 | `taglib_embind.cpp` | `getPictures`, `setPictures`, `addPicture` | Byte-by-byte picture data copies                                        | `byteVectorToUint8Array` (typed_memory_view) / `uint8ArrayToByteVector` (convertJSArrayToNumberVector) | ✅ yes              |
