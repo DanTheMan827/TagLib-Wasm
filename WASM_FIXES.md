@@ -172,29 +172,47 @@ in the picture handling code was replaced with a call to one of these helpers.
 
 ## Memory Model After Fixes
 
-| Phase                       | Peak extra WASM heap (200 MB file)                                                                                 |
-| --------------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| **Before** `loadFromBuffer` | `std::vector` copy (200 MB) + `ByteVector` copy (200 MB) + `std::string` for format (200 MB) = **600 MB extra**    |
-| **After** `loadFromBuffer`  | `std::vector` from `convertJSArrayToNumberVector` (200 MB) + `ByteVector` copy (200 MB) = **200 MB extra at peak** |
-| `getBuffer` before          | Element-by-element Uint8Array (200 MB in WASM + 200 MB in JS) = **400 MB extra**                                   |
-| `getBuffer` after           | `typed_memory_view` (zero-copy view) + JS copy = **200 MB extra**                                                  |
+| Phase                       | Peak extra WASM heap (200 MB file)                                                                                                                                   |
+| --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Before** `loadFromBuffer` | `std::vector` copy (200 MB) + `ByteVector` copy (200 MB) + `std::string` for format (200 MB) = **600 MB extra**                                                      |
+| **After** `loadFromBuffer`  | `std::vector` from `convertJSArrayToNumberVector` (200 MB) + `ByteVector` copy (200 MB) + `ByteVectorStream` internal copy (200 MB) = **600 MB at peak, then freed** |
+| `getBuffer` before          | Element-by-element Uint8Array (200 MB in WASM + 200 MB in JS) = **400 MB extra**                                                                                     |
+| `getBuffer` after           | `typed_memory_view` (zero-copy view) + JS copy = **200 MB extra**                                                                                                    |
 
-A 200 MB file now needs roughly **400 MB** of WASM heap headroom instead of
-**1 GB**.
+The three temporary copies in `loadFromBuffer` are all freed when the function
+returns (only the `ByteVectorStream` copy survives). The WASM heap is pre-grown
+to 3× the file size **before** the first allocation, so no mid-transfer heap
+growth occurs.
 
 ### Build-time Memory Settings (`build/build-wasm.sh`)
 
-| Flag                    | Value   | Purpose                                                               |
-| ----------------------- | ------- | --------------------------------------------------------------------- |
-| `ALLOW_MEMORY_GROWTH=1` | enabled | Heap **grows automatically** as needed — no manual sizing required    |
-| `INITIAL_MEMORY`        | 64 MB   | Starting heap size; avoids early grow calls for typical audio files   |
-| `MAXIMUM_MEMORY`        | 4 GB    | Ceiling for dynamic growth (safe max for 32-bit WASM on 64-bit hosts) |
+| Flag                    | Value      | Purpose                                                                                                                             |
+| ----------------------- | ---------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `ALLOW_MEMORY_GROWTH=1` | enabled    | Heap **grows automatically** as needed — no manual sizing required                                                                  |
+| `INITIAL_MEMORY`        | 64 MB      | Starting heap size; covers TagLib's footprint and typical audio files                                                               |
+| `MAXIMUM_MEMORY`        | 4 GB       | Ceiling for dynamic growth (safe max for 32-bit WASM on 64-bit hosts)                                                               |
+| `MALLOC`                | `emmalloc` | Emscripten's own lightweight allocator — smaller binary, less overhead for large sequential allocations than the default `dlmalloc` |
 
-`ALLOW_MEMORY_GROWTH=1` means the WASM heap expands automatically whenever
-`malloc` needs more space — there is **no need** to pre-size for the exact file
-being processed. The `INITIAL_MEMORY` of 64 MB covers TagLib's own footprint
-plus typical audio files without an early grow. For very large files (e.g.
-uncompressed WAV), the heap grows on demand up to the 4 GB ceiling.
+### Pre-emptive Heap Growth
+
+`loadFromBuffer` uses `emscripten_resize_heap()` (from `<emscripten/heap.h>`)
+to grow the WASM heap **before** the bulk data copy begins:
+
+```cpp
+// Grow the heap to fit 3× the file size before any allocation:
+//   1× std::vector<uint8_t>    (convertJSArrayToNumberVector)
+//   1× TagLib::ByteVector      (copy of raw data)
+//   1× ByteVectorStream        (internal copy)
+emscripten_resize_heap(emscripten_get_heap_size() + byteLength * 3);
+```
+
+This ensures a **single** `WebAssembly.Memory.grow()` call instead of multiple
+smaller grows triggered by successive `malloc` calls. `emscripten_resize_heap`
+is a no-op when the heap is already large enough, so calling it is always safe.
+
+`ALLOW_MEMORY_GROWTH=1` means the WASM heap also expands automatically whenever
+`malloc` needs more space — the pre-grow is a performance optimisation on top of
+that automatic mechanism.
 
 ---
 
@@ -238,3 +256,5 @@ the issues above. No changes were needed to the WASI path.
 | 2 | `taglib_embind.cpp` | `loadFromBuffer` / `detectFormat`          | Full 200 MB file copied into `std::string` for 12-byte format detection | Pass only 12-byte header                                                                               | ✅ yes              |
 | 3 | `taglib_embind.cpp` | `getBuffer`                                | 200M byte-by-byte C++→JS copies                                         | `typed_memory_view` + `new Uint8Array(view)`                                                           | ✅ yes              |
 | 4 | `taglib_embind.cpp` | `getPictures`, `setPictures`, `addPicture` | Byte-by-byte picture data copies                                        | `byteVectorToUint8Array` (typed_memory_view) / `uint8ArrayToByteVector` (convertJSArrayToNumberVector) | ✅ yes              |
+| 5 | `taglib_embind.cpp` | `loadFromBuffer`                           | Multiple `WebAssembly.Memory.grow()` calls mid-allocation               | Pre-grow via `emscripten_resize_heap(current + 3×file_size)` before bulk copy                          | ✅ yes              |
+| 6 | `build-wasm.sh`     | build flags                                | `dlmalloc` (default) — larger, more overhead for sequential patterns    | Switch to `emmalloc` (`-s MALLOC=emmalloc`) — Emscripten's lightweight allocator                       | ✅ yes              |

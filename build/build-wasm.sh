@@ -63,6 +63,7 @@ emcc "$BUILD_DIR/taglib_wasm.cpp" \
   -s ALLOW_MEMORY_GROWTH=1 \
   -s INITIAL_MEMORY=64MB \
   -s MAXIMUM_MEMORY=4GB \
+  -s MALLOC=emmalloc \
   -s EXPORTED_RUNTIME_METHODS='["allocate", "getValue", "setValue", "UTF8ToString", "stringToUTF8", "lengthBytesUTF8", "ALLOC_NORMAL"]' \
   -s NO_FILESYSTEM=1 \
   -s ENVIRONMENT='web,worker,node' \
