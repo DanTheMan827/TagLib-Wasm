@@ -51,3 +51,6 @@ jobs:
 
       - name: Install dependencies
         run: npm install
+
+      - name: Install deno dependencies
+        run: deno install
