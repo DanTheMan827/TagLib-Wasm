@@ -614,14 +614,28 @@ private:
     }
 
     // Copy a JavaScript Uint8Array into a TagLib::ByteVector using a single
-    // native bulk copy. convertJSArrayToNumberVector uses typed_memory_view +
-    // _emval_array_to_memory_view (dst.set(src)) internally — one native call.
-    // NOTE: vecFromJSArray<T> must NOT be used here; it loops byte-by-byte.
+    // allocation and a single native bulk copy.
+    //
+    // WHY NOT convertJSArrayToNumberVector<uint8_t>:
+    //   That helper first allocates a std::vector<uint8_t> (1× image size on
+    //   the WASM heap) and then the TagLib::ByteVector copy-constructor
+    //   allocates a second buffer (another 1× image size).  Because the WASM
+    //   heap only ever grows (ALLOW_MEMORY_GROWTH=1), both allocations are
+    //   counted toward the peak even after the std::vector is freed.  For a
+    //   file whose cover art dominates its size this produces ~4× peak heap
+    //   usage rather than the achievable ~3× minimum.
+    //
+    // FIX: pre-allocate the ByteVector at the target size and bulk-copy the
+    //   JS data directly into it via typed_memory_view.set() — identical to
+    //   the pattern used in loadFromBuffer.  Only one heap allocation is made.
     static TagLib::ByteVector uint8ArrayToByteVector(const val& jsArray) {
-        const auto vec = emscripten::convertJSArrayToNumberVector<uint8_t>(jsArray);
-        if (vec.empty()) return TagLib::ByteVector();
-        return TagLib::ByteVector(reinterpret_cast<const char*>(vec.data()),
-                                  static_cast<unsigned int>(vec.size()));
+        unsigned int size = jsArray["length"].as<unsigned int>();
+        if (size == 0) return TagLib::ByteVector();
+        TagLib::ByteVector bv(size, '\0');
+        val memView = val(emscripten::typed_memory_view(
+            size, reinterpret_cast<uint8_t*>(bv.data())));
+        memView.call<void>("set", jsArray);
+        return bv;
     }
 
 public:
