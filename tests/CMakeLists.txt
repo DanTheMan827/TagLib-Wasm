@@ -65,6 +65,11 @@ IF(WITH_SHORTEN)
     ${CMAKE_CURRENT_SOURCE_DIR}/../taglib/shorten
   )
 ENDIF()
+IF(WITH_MATROSKA)
+  SET(test_HDR_DIRS ${test_HDR_DIRS}
+    ${CMAKE_CURRENT_SOURCE_DIR}/../taglib/matroska
+  )
+ENDIF()
 INCLUDE_DIRECTORIES(${test_HDR_DIRS})
 
 SET(test_runner_SRCS
@@ -126,6 +131,7 @@ IF(WITH_MP4)
     test_mp4.cpp
     test_mp4item.cpp
     test_mp4coverart.cpp
+    test_mp4stem.cpp
   )
 ENDIF()
 IF(WITH_ASF)
@@ -150,6 +156,11 @@ ENDIF()
 IF(WITH_SHORTEN)
   SET(test_runner_SRCS ${test_runner_SRCS}
     test_shorten.cpp
+  )
+ENDIF()
+IF(WITH_MATROSKA)
+  SET(test_runner_SRCS ${test_runner_SRCS}
+    test_matroska.cpp
   )
 ENDIF()
 IF(BUILD_BINDINGS)
