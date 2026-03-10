@@ -471,37 +471,46 @@ public:
                 length, reinterpret_cast<uint8_t*>(buf.data())));
             memoryView.call<void>("set", jsBuffer);
 
-            // detectFormat() is used here only to identify FLAC files (both
-            // plain "fLaC" and FLAC with a prepended ID3v2 tag). FLAC must be
-            // opened as FLAC::File directly because TagLib's content-based scan
-            // (FileRef::parse) probes MPEG first and misidentifies FLAC audio
-            // frame sync codes (0xFFF8) as MPEG sync patterns.
-            //
-            // All other formats are handled by FileRef, which correctly
-            // disambiguates OGG codecs (Vorbis/Opus/FLAC/Speex), ID3-prefixed
-            // non-MP3 formats (TTA, WavPack, etc.), and everything else.
-            std::string format = detectFormat(buf.data(), buf.size());
+            char header[12] = {};
+            unsigned int headerLen = length < 12u ? length : 12u;
+            memcpy(header, buf.data(), headerLen);
 
             stream = std::make_unique<VectorStream>(std::move(buf));
             stream->seek(0, TagLib::IOStream::Beginning);
-
-            if (format == "flac") {
-                file.reset(new TagLib::FLAC::File(stream.get()));
-                if (file && file->isValid()) {
-                    // Transfer ownership to FileRef: FileRefPrivate::~FileRefPrivate()
-                    // calls `delete file`, so we must release the unique_ptr to avoid
-                    // a double-free when FileHandle is destroyed.
-                    fileRef = std::make_unique<TagLib::FileRef>(file.release());
-                    return !fileRef->isNull();
-                }
-                file.reset();
-                stream->seek(0, TagLib::IOStream::Beginning);
-            }
-
-            // For all non-FLAC formats (or if FLAC::File failed), let FileRef
-            // run its own detection, which handles all remaining formats.
+            
+            // Try to create FileRef first
             fileRef = std::make_unique<TagLib::FileRef>(stream.get());
-            return !fileRef->isNull() && fileRef->file() && fileRef->file()->isValid();
+            
+            if (!fileRef->isNull() && fileRef->file() && fileRef->file()->isValid()) {
+                return true;
+            }
+            
+            // If FileRef failed, try specific file types based on format detection
+            stream->seek(0, TagLib::IOStream::Beginning);
+            std::string format = detectFormat(std::string(header, headerLen));
+            
+            if (format == "mp3") {
+                file.reset(new TagLib::MPEG::File(stream.get()));
+            } else if (format == "flac") {
+                file.reset(new TagLib::FLAC::File(stream.get()));
+            } else if (format == "ogg") {
+                file.reset(new TagLib::Ogg::Vorbis::File(stream.get()));
+            } else if (format == "mp4") {
+                file.reset(new TagLib::MP4::File(stream.get()));
+            } else if (format == "wav") {
+                file.reset(new TagLib::RIFF::WAV::File(stream.get()));
+            } else if (format == "aiff") {
+                file.reset(new TagLib::RIFF::AIFF::File(stream.get()));
+            } else if (format == "matroska") {
+                file.reset(new TagLib::Matroska::File(stream.get()));
+            }
+            
+            if (file && file->isValid()) {
+                fileRef = std::make_unique<TagLib::FileRef>(file.release());
+                return !fileRef->isNull();
+            }
+            
+            return false;
         } catch (...) {
             return false;
         }
@@ -686,84 +695,46 @@ public:
     }
     
 private:
-    // Detect audio format from file contents.
-    //
-    // Unambiguous magic-byte formats are checked first so that FLAC, OGG, WAV,
-    // etc. are never misidentified as MP3 by the MPEG sync heuristic (0xFF 0xEx).
-    // FLAC files with a prepended ID3v2 tag are also handled: the syncsafe tag
-    // size in the ID3 header is parsed so we can peek past the ID3 block for
-    // the "fLaC" marker (as TagLib::FLAC::File supports ID3-prefixed FLAC).
-    static std::string detectFormat(const char* data, size_t len) {
-        if (len == 0) return "unknown";
-
-        const unsigned char* d = reinterpret_cast<const unsigned char*>(data);
-
-        // FLAC - unambiguous 4-byte magic ("fLaC"); check before MPEG sync
-        if (len >= 4 && d[0] == 0x66 && d[1] == 0x4C && d[2] == 0x61 && d[3] == 0x43) {
-            return "flac";
+    std::string detectFormat(const std::string& data) const {
+        if (data.size() < 12) return "unknown";
+        
+        const char* d = data.data();
+        
+        // MP3 - Look for ID3 header or MPEG sync
+        if (data.size() >= 3 && (memcmp(d, "ID3", 3) == 0 || 
+            (data.size() >= 2 && (unsigned char)d[0] == 0xFF && ((unsigned char)d[1] & 0xE0) == 0xE0))) {
+            return "mp3";
         }
-
-        // OGG - unambiguous 4-byte magic ("OggS"); check before MPEG sync
-        if (len >= 4 && d[0] == 0x4F && d[1] == 0x67 && d[2] == 0x67 && d[3] == 0x53) {
-            return "ogg";
-        }
-
-        // MP4/M4A - "ftyp" box at offset 4
-        if (len >= 12 && d[4] == 0x66 && d[5] == 0x74 && d[6] == 0x79 && d[7] == 0x70) {
+        
+        // MP4/M4A - Look for ftyp box
+        if (data.size() >= 12 && memcmp(d + 4, "ftyp", 4) == 0) {
             return "mp4";
         }
-
-        // WAV - "RIFF" at 0, "WAVE" at 8
-        if (len >= 12 &&
-            d[0] == 0x52 && d[1] == 0x49 && d[2] == 0x46 && d[3] == 0x46 &&
-            d[8] == 0x57 && d[9] == 0x41 && d[10] == 0x56 && d[11] == 0x45) {
+        
+        // FLAC - Look for fLaC signature
+        if (data.size() >= 4 && memcmp(d, "fLaC", 4) == 0) {
+            return "flac";
+        }
+        
+        // OGG - Look for OggS signature
+        if (data.size() >= 4 && memcmp(d, "OggS", 4) == 0) {
+            return "ogg";
+        }
+        
+        // WAV - Look for RIFF header
+        if (data.size() >= 12 && memcmp(d, "RIFF", 4) == 0 && memcmp(d + 8, "WAVE", 4) == 0) {
             return "wav";
         }
-
-        // AIFF - "FORM" at 0, "AIFF" at 8
-        if (len >= 12 &&
-            d[0] == 0x46 && d[1] == 0x4F && d[2] == 0x52 && d[3] == 0x4D &&
-            d[8] == 0x41 && d[9] == 0x49 && d[10] == 0x46 && d[11] == 0x46) {
+        
+        // AIFF - Look for FORM header
+        if (data.size() >= 12 && memcmp(d, "FORM", 4) == 0 && memcmp(d + 8, "AIFF", 4) == 0) {
             return "aiff";
         }
 
         // Matroska/WebM - EBML signature
-        if (len >= 4 && d[0] == 0x1A && d[1] == 0x45 && d[2] == 0xDF && d[3] == 0xA3) {
+        if (data.size() >= 4 && (unsigned char)d[0] == 0x1A && (unsigned char)d[1] == 0x45 &&
+            (unsigned char)d[2] == 0xDF && (unsigned char)d[3] == 0xA3) {
             return "matroska";
-        }
-
-        // ID3v2 tag prefix ("ID3") - could be MP3, or FLAC with a prepended ID3 tag.
-        // Parse the syncsafe size so we can peek past the ID3 block for "fLaC".
-        // Note: ID3v2.4 optionally appends a 10-byte footer (flag bit 4); we do
-        // not account for it here, so a FLAC+ID3+footer file falls through to
-        // FileRef, which handles it correctly via FLAC::File::isSupported().
-        if (len >= 3 && d[0] == 0x49 && d[1] == 0x44 && d[2] == 0x33) {
-            if (len >= 10) {
-                // ID3v2 syncsafe integer: each byte must have bit 7 clear.
-                // Return "unknown" for malformed headers so FileRef can try.
-                if ((d[6] | d[7] | d[8] | d[9]) & 0x80u) {
-                    return "unknown"; // malformed syncsafe; let FileRef decide
-                }
-                size_t id3_body = ((size_t)d[6] << 21) |
-                                  ((size_t)d[7] << 14) |
-                                  ((size_t)d[8] << 7)  |
-                                   (size_t)d[9];
-                size_t id3_total = 10 + id3_body; // 10-byte ID3 header + body
-                // Syncsafe values cap id3_body at ~256 MB; id3_total + 4 cannot
-                // overflow size_t.  If "fLaC" immediately follows, it's FLAC+ID3.
-                if (len >= id3_total + 4 &&
-                    d[id3_total + 0] == 0x66 && d[id3_total + 1] == 0x4C &&
-                    d[id3_total + 2] == 0x61 && d[id3_total + 3] == 0x43) {
-                    return "flac";
-                }
-            }
-            return "mp3";
-        }
-
-        // MPEG sync (0xFF followed by 0xEx or 0xFx) - checked last to avoid
-        // false positives from FLAC audio frame sync codes (0xFFF8)
-        if (len >= 2 && d[0] == 0xFF && (d[1] & 0xE0) == 0xE0) {
-            return "mp3";
         }
 
         return "unknown";

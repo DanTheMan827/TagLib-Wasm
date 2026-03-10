@@ -246,15 +246,19 @@ namespace
   {
     File *file = nullptr;
 
-    if(MPEG::File::isSupported(stream))
+    // FLAC must be checked before MPEG: FLAC audio frame sync codes (0xFFF8)
+    // match the MPEG sync pattern (0xFF 0xEx), causing MPEG::File::isSupported()
+    // to return true for plain FLAC files. FLAC::File::isSupported() correctly
+    // skips any prepended ID3v2 tag before looking for the "fLaC" marker.
+    if(FLAC::File::isSupported(stream))
+      file = new FLAC::File(stream, readAudioProperties, audioPropertiesStyle);
+    else if(MPEG::File::isSupported(stream))
       file = new MPEG::File(stream, readAudioProperties, audioPropertiesStyle);
 #ifdef TAGLIB_WITH_VORBIS
     else if(Ogg::Vorbis::File::isSupported(stream))
       file = new Ogg::Vorbis::File(stream, readAudioProperties, audioPropertiesStyle);
     else if(Ogg::FLAC::File::isSupported(stream))
       file = new Ogg::FLAC::File(stream, readAudioProperties, audioPropertiesStyle);
-    else if(FLAC::File::isSupported(stream))
-      file = new FLAC::File(stream, readAudioProperties, audioPropertiesStyle);
     else if(Ogg::Speex::File::isSupported(stream))
       file = new Ogg::Speex::File(stream, readAudioProperties, audioPropertiesStyle);
     else if(Ogg::Opus::File::isSupported(stream))

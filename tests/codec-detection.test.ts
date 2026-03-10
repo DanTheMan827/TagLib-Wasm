@@ -175,6 +175,53 @@ describe("Codec Detection", () => {
       file.dispose();
     }
   });
+
+  /**
+   * When a FLAC+ID3 file is saved, the output must start with "fLaC" magic
+   * (pure FLAC) and must NOT start with "ID3". TagLib's FLAC::File strips
+   * prepended ID3v2 tags on save, rewriting the file as standard FLAC.
+   */
+  it("FLAC with ID3 header - saving must NOT prepend an ID3 header", async () => {
+    const taglib = await TagLib.initialize({ forceWasmType: "emscripten" });
+    const flacPath = join(
+      "tests",
+      "test-files",
+      "flac",
+      "kiss-snippet-with-id3.flac",
+    );
+    const flacBuffer = await Deno.readFile(flacPath);
+    const file = await taglib.open(flacBuffer);
+
+    try {
+      file.tag().setTitle("No ID3 on save");
+      const saved = file.save();
+      assertEquals(saved, true, "save() must succeed");
+      const out = file.getFileBuffer();
+      // Must start with "fLaC" (0x66 0x4C 0x61 0x43), not "ID3"
+      assertEquals(
+        out[0],
+        0x66,
+        "Saved FLAC must start with 0x66 ('f'), not an ID3 header",
+      );
+      assertEquals(
+        out[1],
+        0x4C,
+        "Saved FLAC must start with 'fL', not an ID3 header",
+      );
+      assertEquals(
+        out[2],
+        0x61,
+        "Saved FLAC must start with 'fLa', not an ID3 header",
+      );
+      assertEquals(
+        out[3],
+        0x43,
+        "Saved FLAC must start with 'fLaC', not an ID3 header",
+      );
+    } finally {
+      file.dispose();
+    }
+  });
 });
 
 /**
