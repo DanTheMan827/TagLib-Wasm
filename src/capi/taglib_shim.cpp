@@ -305,14 +305,18 @@ static const char* detect_format(const uint8_t* buf, size_t len) {
     // Parse the syncsafe size so we can peek past the ID3 block for "fLaC".
     if (len >= 3 && buf[0] == 0x49 && buf[1] == 0x44 && buf[2] == 0x33) {
         if (len >= 10) {
-            // ID3v2 syncsafe integer: 4 bytes at offset 6, 7 bits each
-            size_t id3_body = ((size_t)(buf[6] & 0x7F) << 21) |
-                              ((size_t)(buf[7] & 0x7F) << 14) |
-                              ((size_t)(buf[8] & 0x7F) << 7)  |
-                               (size_t)(buf[9] & 0x7F);
+            // ID3v2 syncsafe integer: each byte must have bit 7 clear.
+            // Bail out early if the header is malformed.
+            if ((buf[6] | buf[7] | buf[8] | buf[9]) & 0x80u) {
+                return "mp3"; // malformed syncsafe; assume MP3
+            }
+            size_t id3_body = ((size_t)buf[6] << 21) |
+                              ((size_t)buf[7] << 14) |
+                              ((size_t)buf[8] << 7)  |
+                               (size_t)buf[9];
             size_t id3_total = 10 + id3_body; // 10-byte ID3 header + body
             // If "fLaC" immediately follows the ID3 block, it's FLAC+ID3
-            if (len >= id3_total + 4 &&
+            if (id3_total <= len - 4 &&
                 buf[id3_total + 0] == 0x66 && buf[id3_total + 1] == 0x4C &&
                 buf[id3_total + 2] == 0x61 && buf[id3_total + 3] == 0x43) {
                 return "flac";
@@ -612,44 +616,6 @@ static tl_error_code write_to_buffer(const uint8_t* buf, size_t len,
         TagLib::ByteVectorStream stream(
             TagLib::ByteVector(reinterpret_cast<const char*>(buf),
                                static_cast<unsigned int>(len)));
-
-        // Use detect_format() as the primary path. This correctly handles plain
-        // FLAC ("fLaC" magic) and FLAC with a prepended ID3v2 tag. The FLAC
-        // code path must open the file as FLAC::File to access FLAC-specific
-        // metadata (Vorbis comments, embedded pictures) via the FLAC API.
-        //
-        // Note: FLAC::File is heap-allocated and ownership is transferred to
-        // FileRef (which calls `delete file` in its destructor). Passing the
-        // address of a stack-allocated FLAC::File to FileRef would cause
-        // a double-free / undefined behaviour.
-        const char* fmt = detect_format(buf, len);
-
-        if (std::strcmp(fmt, "flac") == 0) {
-            std::unique_ptr<TagLib::FLAC::File> flacOwn(
-                new TagLib::FLAC::File(&stream));
-            if (flacOwn->isValid() && flacOwn->tag()) {
-                TagLib::FLAC::File* flacPtr = flacOwn.release(); // transfer to FileRef
-                TagLib::FileRef flacRef(flacPtr);                // takes ownership
-                if (uses_intpair_format(flacPtr)) {
-                    merge_intpair_properties(propMap);
-                }
-                apply_propmap(flacRef, propMap);
-                apply_pictures_from_msgpack(flacPtr, tags_msgpack, tags_msgpack_len);
-                apply_ratings_from_msgpack(flacPtr, tags_msgpack, tags_msgpack_len);
-                apply_lyrics_from_msgpack(flacPtr, tags_msgpack, tags_msgpack_len);
-                apply_chapters_from_msgpack(flacPtr, tags_msgpack, tags_msgpack_len);
-
-                if (!flacRef.save()) return TL_ERROR_IO_WRITE;
-
-                const TagLib::ByteVector* result = stream.data();
-                *out_size = result->size();
-                *out_buf = (uint8_t*)malloc(result->size());
-                if (!*out_buf) return TL_ERROR_MEMORY_ALLOCATION;
-                memcpy(*out_buf, result->data(), result->size());
-                return TL_SUCCESS;
-            }
-            stream.seek(0, TagLib::IOStream::Beginning);
-        }
 
         TagLib::FileRef ref(&stream);
         if (ref.isNull() || !ref.tag()) return TL_ERROR_PARSE_FAILED;

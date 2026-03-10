@@ -748,14 +748,18 @@ private:
         // Parse the syncsafe size so we can peek past the ID3 block for "fLaC".
         if (len >= 3 && d[0] == 0x49 && d[1] == 0x44 && d[2] == 0x33) {
             if (len >= 10) {
-                // ID3v2 syncsafe integer: 4 bytes at offset 6, 7 bits each
-                size_t id3_body = ((size_t)(d[6] & 0x7F) << 21) |
-                                  ((size_t)(d[7] & 0x7F) << 14) |
-                                  ((size_t)(d[8] & 0x7F) << 7)  |
-                                   (size_t)(d[9] & 0x7F);
+                // ID3v2 syncsafe integer: each byte must have bit 7 clear.
+                // Bail out early if the header is malformed.
+                if ((d[6] | d[7] | d[8] | d[9]) & 0x80u) {
+                    return "mp3"; // malformed syncsafe; assume MP3
+                }
+                size_t id3_body = ((size_t)d[6] << 21) |
+                                  ((size_t)d[7] << 14) |
+                                  ((size_t)d[8] << 7)  |
+                                   (size_t)d[9];
                 size_t id3_total = 10 + id3_body; // 10-byte ID3 header + body
                 // If "fLaC" immediately follows the ID3 block, it's FLAC+ID3
-                if (len >= id3_total + 4 &&
+                if (id3_total <= len - 4 &&
                     d[id3_total + 0] == 0x66 && d[id3_total + 1] == 0x4C &&
                     d[id3_total + 2] == 0x61 && d[id3_total + 3] == 0x43) {
                     return "flac";
