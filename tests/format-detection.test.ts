@@ -11,6 +11,7 @@ import {
   readFixture,
 } from "./backend-adapter.ts";
 import { type Format, FORMATS } from "./shared-fixtures.ts";
+import { join } from "@std/path";
 
 forEachBackend("Format Detection", (adapter: BackendAdapter) => {
   beforeAll(async () => {
@@ -28,6 +29,26 @@ forEachBackend("Format Detection", (adapter: BackendAdapter) => {
       assertExists(tags, `${format}: should successfully read tags`);
     });
   }
+
+  /**
+   * Regression: FLAC files whose audio frame sync code (0xFFF8) overlaps with
+   * the MPEG sync pattern (0xFF 0xEx) were previously misidentified as MP3 by
+   * TagLib's content-based detection. Verify both backends return "FLAC".
+   */
+  it(
+    "should detect FLAC with MPEG-like frame sync as FLAC (not MP3)",
+    async () => {
+      const buffer = await Deno.readFile(
+        join("tests", "test-files", "flac", "flac-with-mpeg-sync.flac"),
+      );
+      const format = await adapter.readFormat(buffer, "flac");
+      assertEquals(
+        format,
+        "FLAC",
+        `[${adapter.kind}] FLAC file with MPEG-like frame sync was misdetected as "${format}"`,
+      );
+    },
+  );
 
   it("should reject empty buffer", async () => {
     const empty = new Uint8Array(0);

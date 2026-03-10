@@ -42,6 +42,15 @@ const CONTAINER_TO_FORMAT: Record<string, string> = {
   Matroska: "MATROSKA",
 };
 
+/** Returns true when the first bytes of `data` match the ASCII string `sig`. */
+function hasMagic(data: Uint8Array, sig: string): boolean {
+  if (data.length < sig.length) return false;
+  for (let i = 0; i < sig.length; i++) {
+    if (data[i] !== sig.charCodeAt(i)) return false;
+  }
+  return true;
+}
+
 const NUMERIC_FIELD_ALIASES: Record<string, string> = {
   date: "year",
   trackNumber: "track",
@@ -170,6 +179,16 @@ export class WasiFileHandle implements FileHandle {
     this.checkNotDestroyed();
     if (!this.fileData || this.fileData.length < 8) return "unknown";
 
+    const magic = this.fileData.slice(0, 4);
+
+    // Check deterministic magic byte signatures BEFORE using the WASM-reported
+    // containerFormat. TagLib's content-based detection can misidentify FLAC files
+    // as MP3 because the FLAC audio frame sync code (0xFFF8) matches the MPEG
+    // sync pattern (0xFF 0xEx). By checking "fLaC" first we always return the
+    // correct format regardless of what the WASM reports.
+    if (hasMagic(magic, "fLaC")) return "FLAC";
+    if (hasMagic(magic, "OggS")) return this.detectOggCodec();
+
     const container = this.tagData?.containerFormat as string | undefined;
     if (container) {
       const codec = this.tagData?.codec as string | undefined;
@@ -177,33 +196,13 @@ export class WasiFileHandle implements FileHandle {
       if (CONTAINER_TO_FORMAT[container]) return CONTAINER_TO_FORMAT[container];
     }
 
-    const magic = this.fileData.slice(0, 4);
     if (magic[0] === 0xFF && (magic[1] & 0xE0) === 0xE0) return "MP3";
-    if (magic[0] === 0x49 && magic[1] === 0x44 && magic[2] === 0x33) {
-      return "MP3";
-    }
-    if (
-      magic[0] === 0x66 && magic[1] === 0x4C && magic[2] === 0x61 &&
-      magic[3] === 0x43
-    ) return "FLAC";
-    if (
-      magic[0] === 0x4F && magic[1] === 0x67 && magic[2] === 0x67 &&
-      magic[3] === 0x53
-    ) return this.detectOggCodec();
-    if (
-      magic[0] === 0x52 && magic[1] === 0x49 && magic[2] === 0x46 &&
-      magic[3] === 0x46
-    ) return "WAV";
+    if (hasMagic(magic, "ID3")) return "MP3";
+    if (hasMagic(magic, "RIFF")) return "WAV";
     // WavPack: "wvpk"
-    if (
-      magic[0] === 0x77 && magic[1] === 0x76 && magic[2] === 0x70 &&
-      magic[3] === 0x6B
-    ) return "WV";
+    if (hasMagic(magic, "wvpk")) return "WV";
     // TrueAudio: "TTA1"
-    if (
-      magic[0] === 0x54 && magic[1] === 0x54 && magic[2] === 0x41 &&
-      magic[3] === 0x31
-    ) return "TTA";
+    if (hasMagic(magic, "TTA1")) return "TTA";
     // ASF/WMA: ASF header object GUID
     if (
       this.fileData.length >= 16 &&
@@ -216,10 +215,7 @@ export class WasiFileHandle implements FileHandle {
       magic[3] === 0xA3
     ) return "MATROSKA";
     const ftyp = this.fileData.slice(4, 8);
-    if (
-      ftyp[0] === 0x66 && ftyp[1] === 0x74 && ftyp[2] === 0x79 &&
-      ftyp[3] === 0x70
-    ) return "MP4";
+    if (hasMagic(ftyp, "ftyp")) return "MP4";
     return "unknown";
   }
 

@@ -477,7 +477,21 @@ public:
 
             stream = std::make_unique<VectorStream>(std::move(buf));
             stream->seek(0, TagLib::IOStream::Beginning);
-            
+
+            // Pre-check for "fLaC" magic: FLAC files must be opened as FLAC::File
+            // directly. TagLib's content-based detection (detectByContent) checks
+            // MPEG first and can misidentify a FLAC file as MP3 because FLAC audio
+            // frame sync codes (0xFFF8) match the MPEG sync pattern (0xFF 0xEx).
+            if (headerLen >= 4 && memcmp(header, "fLaC", 4) == 0) {
+                file.reset(new TagLib::FLAC::File(stream.get()));
+                if (file && file->isValid()) {
+                    fileRef = std::make_unique<TagLib::FileRef>(file.get());
+                    return !fileRef->isNull();
+                }
+                file.reset();
+                stream->seek(0, TagLib::IOStream::Beginning);
+            }
+
             // Try to create FileRef first
             fileRef = std::make_unique<TagLib::FileRef>(stream.get());
             

@@ -26,6 +26,7 @@
 #include <tbytevectorstream.h>
 #include <tfilestream.h>
 #include <audioproperties.h>
+#include <flacfile.h>
 #include <mp4file.h>
 #include <mpegfile.h>
 
@@ -252,6 +253,17 @@ static tl_error_code encode_file_to_msgpack(TagLib::File* file,
     return TL_SUCCESS;
 }
 
+// Returns true if the buffer starts with the canonical FLAC magic bytes "fLaC".
+// FLAC files must be opened as TagLib::FLAC::File directly rather than relying
+// on TagLib::FileRef's content-based detection, because the FLAC audio frame
+// sync code (0xFFF8) matches the MPEG sync pattern (0xFF 0xEx), causing
+// MPEG::File::isSupported() to return true before FLAC::File is tried.
+static bool has_flac_magic(const uint8_t* buf, size_t len) {
+    return len >= 4 &&
+           buf[0] == 0x66 && buf[1] == 0x4C &&
+           buf[2] == 0x61 && buf[3] == 0x43;
+}
+
 static tl_error_code read_from_buffer(const uint8_t* buf, size_t len,
                                       tl_format /* format */,
                                       uint8_t** out_buf, size_t* out_size) {
@@ -259,6 +271,16 @@ static tl_error_code read_from_buffer(const uint8_t* buf, size_t len,
         TagLib::ByteVector bv(reinterpret_cast<const char*>(buf),
                               static_cast<unsigned int>(len));
         TagLib::ByteVectorStream stream(bv);
+
+        // Pre-check for "fLaC" magic: see has_flac_magic() for rationale.
+        if (has_flac_magic(buf, len)) {
+            TagLib::FLAC::File flacFile(&stream);
+            if (flacFile.isValid()) {
+                return encode_file_to_msgpack(&flacFile, out_buf, out_size);
+            }
+            stream.seek(0, TagLib::IOStream::Beginning);
+        }
+
         TagLib::FileRef ref(&stream);
         if (ref.isNull()) return TL_ERROR_PARSE_FAILED;
 
@@ -518,6 +540,33 @@ static tl_error_code write_to_buffer(const uint8_t* buf, size_t len,
         TagLib::ByteVectorStream stream(
             TagLib::ByteVector(reinterpret_cast<const char*>(buf),
                                static_cast<unsigned int>(len)));
+
+        // Pre-check for "fLaC" magic: see has_flac_magic() for rationale.
+        if (has_flac_magic(buf, len)) {
+            TagLib::FLAC::File flacFile(&stream);
+            if (flacFile.isValid() && flacFile.tag()) {
+                if (uses_intpair_format(&flacFile)) {
+                    merge_intpair_properties(propMap);
+                }
+                TagLib::FileRef flacRef(&flacFile);
+                apply_propmap(flacRef, propMap);
+                apply_pictures_from_msgpack(&flacFile, tags_msgpack, tags_msgpack_len);
+                apply_ratings_from_msgpack(&flacFile, tags_msgpack, tags_msgpack_len);
+                apply_lyrics_from_msgpack(&flacFile, tags_msgpack, tags_msgpack_len);
+                apply_chapters_from_msgpack(&flacFile, tags_msgpack, tags_msgpack_len);
+
+                if (!flacRef.save()) return TL_ERROR_IO_WRITE;
+
+                const TagLib::ByteVector* result = stream.data();
+                *out_size = result->size();
+                *out_buf = (uint8_t*)malloc(result->size());
+                if (!*out_buf) return TL_ERROR_MEMORY_ALLOCATION;
+                memcpy(*out_buf, result->data(), result->size());
+                return TL_SUCCESS;
+            }
+            stream.seek(0, TagLib::IOStream::Beginning);
+        }
+
         TagLib::FileRef ref(&stream);
         if (ref.isNull() || !ref.tag()) return TL_ERROR_PARSE_FAILED;
 
