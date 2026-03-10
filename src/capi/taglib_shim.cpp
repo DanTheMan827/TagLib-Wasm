@@ -253,15 +253,81 @@ static tl_error_code encode_file_to_msgpack(TagLib::File* file,
     return TL_SUCCESS;
 }
 
-// Returns true if the buffer starts with the canonical FLAC magic bytes "fLaC".
-// FLAC files must be opened as TagLib::FLAC::File directly rather than relying
-// on TagLib::FileRef's content-based detection, because the FLAC audio frame
-// sync code (0xFFF8) matches the MPEG sync pattern (0xFF 0xEx), causing
-// MPEG::File::isSupported() to return true before FLAC::File is tried.
-static bool has_flac_magic(const uint8_t* buf, size_t len) {
-    return len >= 4 &&
-           buf[0] == 0x66 && buf[1] == 0x4C &&
-           buf[2] == 0x61 && buf[3] == 0x43;
+// Detect audio format from file contents.
+//
+// Unambiguous magic-byte formats are checked first so that FLAC, OGG, WAV,
+// etc. are never misidentified as MP3 by the MPEG sync heuristic (0xFF 0xEx).
+// FLAC files with a prepended ID3v2 tag are also handled: the syncsafe tag
+// size in the ID3 header is parsed so we can peek past the ID3 block for
+// the "fLaC" marker (as TagLib::FLAC::File supports ID3-prefixed FLAC).
+static const char* detect_format(const uint8_t* buf, size_t len) {
+    if (len == 0) return "unknown";
+
+    // FLAC - unambiguous 4-byte magic ("fLaC"); check before MPEG sync
+    if (len >= 4 &&
+        buf[0] == 0x66 && buf[1] == 0x4C && buf[2] == 0x61 && buf[3] == 0x43) {
+        return "flac";
+    }
+
+    // OGG - unambiguous 4-byte magic ("OggS"); check before MPEG sync
+    if (len >= 4 &&
+        buf[0] == 0x4F && buf[1] == 0x67 && buf[2] == 0x67 && buf[3] == 0x53) {
+        return "ogg";
+    }
+
+    // MP4/M4A - "ftyp" box at offset 4
+    if (len >= 12 &&
+        buf[4] == 0x66 && buf[5] == 0x74 && buf[6] == 0x79 && buf[7] == 0x70) {
+        return "mp4";
+    }
+
+    // WAV - "RIFF" at 0, "WAVE" at 8
+    if (len >= 12 &&
+        buf[0] == 0x52 && buf[1] == 0x49 && buf[2] == 0x46 && buf[3] == 0x46 &&
+        buf[8] == 0x57 && buf[9] == 0x41 && buf[10] == 0x56 && buf[11] == 0x45) {
+        return "wav";
+    }
+
+    // AIFF - "FORM" at 0, "AIFF" at 8
+    if (len >= 12 &&
+        buf[0] == 0x46 && buf[1] == 0x4F && buf[2] == 0x52 && buf[3] == 0x4D &&
+        buf[8] == 0x41 && buf[9] == 0x49 && buf[10] == 0x46 && buf[11] == 0x46) {
+        return "aiff";
+    }
+
+    // Matroska/WebM - EBML signature
+    if (len >= 4 &&
+        buf[0] == 0x1A && buf[1] == 0x45 && buf[2] == 0xDF && buf[3] == 0xA3) {
+        return "matroska";
+    }
+
+    // ID3v2 tag prefix ("ID3") - could be MP3, or FLAC with a prepended ID3 tag.
+    // Parse the syncsafe size so we can peek past the ID3 block for "fLaC".
+    if (len >= 3 && buf[0] == 0x49 && buf[1] == 0x44 && buf[2] == 0x33) {
+        if (len >= 10) {
+            // ID3v2 syncsafe integer: 4 bytes at offset 6, 7 bits each
+            size_t id3_body = ((size_t)(buf[6] & 0x7F) << 21) |
+                              ((size_t)(buf[7] & 0x7F) << 14) |
+                              ((size_t)(buf[8] & 0x7F) << 7)  |
+                               (size_t)(buf[9] & 0x7F);
+            size_t id3_total = 10 + id3_body; // 10-byte ID3 header + body
+            // If "fLaC" immediately follows the ID3 block, it's FLAC+ID3
+            if (len >= id3_total + 4 &&
+                buf[id3_total + 0] == 0x66 && buf[id3_total + 1] == 0x4C &&
+                buf[id3_total + 2] == 0x61 && buf[id3_total + 3] == 0x43) {
+                return "flac";
+            }
+        }
+        return "mp3";
+    }
+
+    // MPEG sync (0xFF followed by 0xEx or 0xFx) - checked last to avoid
+    // false positives from FLAC audio frame sync codes (0xFFF8)
+    if (len >= 2 && buf[0] == 0xFF && (buf[1] & 0xE0) == 0xE0) {
+        return "mp3";
+    }
+
+    return "unknown";
 }
 
 static tl_error_code read_from_buffer(const uint8_t* buf, size_t len,
@@ -272,8 +338,13 @@ static tl_error_code read_from_buffer(const uint8_t* buf, size_t len,
                               static_cast<unsigned int>(len));
         TagLib::ByteVectorStream stream(bv);
 
-        // Pre-check for "fLaC" magic: see has_flac_magic() for rationale.
-        if (has_flac_magic(buf, len)) {
+        // Use detect_format() as the primary path to avoid TagLib's content-
+        // based scan (FileRef::parse) probing MPEG first and misidentifying
+        // FLAC audio frame sync codes (0xFFF8) as MPEG. This also handles
+        // FLAC files with prepended ID3v2 tags.
+        const char* fmt = detect_format(buf, len);
+
+        if (std::strcmp(fmt, "flac") == 0) {
             TagLib::FLAC::File flacFile(&stream);
             if (flacFile.isValid()) {
                 return encode_file_to_msgpack(&flacFile, out_buf, out_size);
@@ -281,6 +352,7 @@ static tl_error_code read_from_buffer(const uint8_t* buf, size_t len,
             stream.seek(0, TagLib::IOStream::Beginning);
         }
 
+        // Fall back to FileRef for all other (or unrecognized) formats.
         TagLib::FileRef ref(&stream);
         if (ref.isNull()) return TL_ERROR_PARSE_FAILED;
 
@@ -541,19 +613,31 @@ static tl_error_code write_to_buffer(const uint8_t* buf, size_t len,
             TagLib::ByteVector(reinterpret_cast<const char*>(buf),
                                static_cast<unsigned int>(len)));
 
-        // Pre-check for "fLaC" magic: see has_flac_magic() for rationale.
-        if (has_flac_magic(buf, len)) {
-            TagLib::FLAC::File flacFile(&stream);
-            if (flacFile.isValid() && flacFile.tag()) {
-                if (uses_intpair_format(&flacFile)) {
+        // Use detect_format() as the primary path. This correctly handles plain
+        // FLAC ("fLaC" magic) and FLAC with a prepended ID3v2 tag. The FLAC
+        // code path must open the file as FLAC::File to access FLAC-specific
+        // metadata (Vorbis comments, embedded pictures) via the FLAC API.
+        //
+        // Note: FLAC::File is heap-allocated and ownership is transferred to
+        // FileRef (which calls `delete file` in its destructor). Passing the
+        // address of a stack-allocated FLAC::File to FileRef would cause
+        // a double-free / undefined behaviour.
+        const char* fmt = detect_format(buf, len);
+
+        if (std::strcmp(fmt, "flac") == 0) {
+            std::unique_ptr<TagLib::FLAC::File> flacOwn(
+                new TagLib::FLAC::File(&stream));
+            if (flacOwn->isValid() && flacOwn->tag()) {
+                TagLib::FLAC::File* flacPtr = flacOwn.release(); // transfer to FileRef
+                TagLib::FileRef flacRef(flacPtr);                // takes ownership
+                if (uses_intpair_format(flacPtr)) {
                     merge_intpair_properties(propMap);
                 }
-                TagLib::FileRef flacRef(&flacFile);
                 apply_propmap(flacRef, propMap);
-                apply_pictures_from_msgpack(&flacFile, tags_msgpack, tags_msgpack_len);
-                apply_ratings_from_msgpack(&flacFile, tags_msgpack, tags_msgpack_len);
-                apply_lyrics_from_msgpack(&flacFile, tags_msgpack, tags_msgpack_len);
-                apply_chapters_from_msgpack(&flacFile, tags_msgpack, tags_msgpack_len);
+                apply_pictures_from_msgpack(flacPtr, tags_msgpack, tags_msgpack_len);
+                apply_ratings_from_msgpack(flacPtr, tags_msgpack, tags_msgpack_len);
+                apply_lyrics_from_msgpack(flacPtr, tags_msgpack, tags_msgpack_len);
+                apply_chapters_from_msgpack(flacPtr, tags_msgpack, tags_msgpack_len);
 
                 if (!flacRef.save()) return TL_ERROR_IO_WRITE;
 
