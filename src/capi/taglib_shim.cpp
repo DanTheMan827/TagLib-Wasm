@@ -303,20 +303,24 @@ static const char* detect_format(const uint8_t* buf, size_t len) {
 
     // ID3v2 tag prefix ("ID3") - could be MP3, or FLAC with a prepended ID3 tag.
     // Parse the syncsafe size so we can peek past the ID3 block for "fLaC".
+    // Note: ID3v2.4 optionally appends a 10-byte footer (flag bit 4); we do
+    // not account for it here, so a FLAC+ID3+footer file falls through to
+    // FileRef, which handles it correctly via FLAC::File::isSupported().
     if (len >= 3 && buf[0] == 0x49 && buf[1] == 0x44 && buf[2] == 0x33) {
         if (len >= 10) {
             // ID3v2 syncsafe integer: each byte must have bit 7 clear.
-            // Bail out early if the header is malformed.
+            // Return "unknown" for malformed headers so FileRef can try.
             if ((buf[6] | buf[7] | buf[8] | buf[9]) & 0x80u) {
-                return "mp3"; // malformed syncsafe; assume MP3
+                return "unknown"; // malformed syncsafe; let FileRef decide
             }
             size_t id3_body = ((size_t)buf[6] << 21) |
                               ((size_t)buf[7] << 14) |
                               ((size_t)buf[8] << 7)  |
                                (size_t)buf[9];
             size_t id3_total = 10 + id3_body; // 10-byte ID3 header + body
-            // If "fLaC" immediately follows the ID3 block, it's FLAC+ID3
-            if (id3_total <= len - 4 &&
+            // Syncsafe values cap id3_body at ~256 MB; id3_total + 4 cannot
+            // overflow size_t.  If "fLaC" immediately follows, it's FLAC+ID3.
+            if (len >= id3_total + 4 &&
                 buf[id3_total + 0] == 0x66 && buf[id3_total + 1] == 0x4C &&
                 buf[id3_total + 2] == 0x61 && buf[id3_total + 3] == 0x43) {
                 return "flac";
@@ -342,13 +346,12 @@ static tl_error_code read_from_buffer(const uint8_t* buf, size_t len,
                               static_cast<unsigned int>(len));
         TagLib::ByteVectorStream stream(bv);
 
-        // Use detect_format() as the primary path to avoid TagLib's content-
-        // based scan (FileRef::parse) probing MPEG first and misidentifying
-        // FLAC audio frame sync codes (0xFFF8) as MPEG. This also handles
-        // FLAC files with prepended ID3v2 tags.
-        const char* fmt = detect_format(buf, len);
-
-        if (std::strcmp(fmt, "flac") == 0) {
+        // detect_format() is used only to identify FLAC (both plain "fLaC" and
+        // FLAC with a prepended ID3v2 tag). FLAC must be opened as FLAC::File
+        // directly because TagLib's FileRef probes MPEG first and misidentifies
+        // FLAC audio frame sync codes (0xFFF8) as MPEG sync patterns.
+        // All other formats are handled by FileRef below.
+        if (std::strcmp(detect_format(buf, len), "flac") == 0) {
             TagLib::FLAC::File flacFile(&stream);
             if (flacFile.isValid()) {
                 return encode_file_to_msgpack(&flacFile, out_buf, out_size);
@@ -356,7 +359,8 @@ static tl_error_code read_from_buffer(const uint8_t* buf, size_t len,
             stream.seek(0, TagLib::IOStream::Beginning);
         }
 
-        // Fall back to FileRef for all other (or unrecognized) formats.
+        // Let FileRef handle all non-FLAC formats (OGG variants, ID3-prefixed
+        // non-MP3 files, WMA, Matroska, etc.) via its own detection.
         TagLib::FileRef ref(&stream);
         if (ref.isNull()) return TL_ERROR_PARSE_FAILED;
 
