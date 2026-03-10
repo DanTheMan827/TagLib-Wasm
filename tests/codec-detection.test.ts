@@ -4,10 +4,7 @@ import { assertEquals } from "@std/assert";
 import { afterAll, beforeAll, describe, it } from "@std/testing/bdd";
 import { TagLib } from "../src/taglib.ts";
 import { join } from "@std/path";
-import {
-  type BackendAdapter,
-  forEachBackend,
-} from "./backend-adapter.ts";
+import { type BackendAdapter, forEachBackend } from "./backend-adapter.ts";
 
 describe("Codec Detection", () => {
   it("MP3 - both container and codec", async () => {

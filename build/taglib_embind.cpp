@@ -485,7 +485,10 @@ public:
             if (headerLen >= 4 && memcmp(header, "fLaC", 4) == 0) {
                 file.reset(new TagLib::FLAC::File(stream.get()));
                 if (file && file->isValid()) {
-                    fileRef = std::make_unique<TagLib::FileRef>(file.get());
+                    // Transfer ownership to FileRef: FileRefPrivate::~FileRefPrivate()
+                    // calls `delete file`, so we must release the unique_ptr to avoid
+                    // a double-free when FileHandle is destroyed.
+                    fileRef = std::make_unique<TagLib::FileRef>(file.release());
                     return !fileRef->isNull();
                 }
                 file.reset();
@@ -520,7 +523,8 @@ public:
             }
             
             if (file && file->isValid()) {
-                fileRef = std::make_unique<TagLib::FileRef>(file.get());
+                // Same ownership transfer: FileRef owns the file pointer.
+                fileRef = std::make_unique<TagLib::FileRef>(file.release());
                 return !fileRef->isNull();
             }
             
